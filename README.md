@@ -1,10 +1,11 @@
 # 🌡️ GPU Thermal Management System
 
-> A closed-loop cooling controller for a GPU enclosure: an Arduino reads temperature from a DHT11 and switches 12 V DC fans through a logic-level MOSFET, using hysteresis so the fans don't chatter.
+> An Arduino-based cooling system for a GPU enclosure: a DHT11 measures the temperature, and the Arduino adjusts fan speed with PWM through an IRF520 MOSFET module. The hotter it gets, the faster the fans spin.
 
 ![Arduino](https://img.shields.io/badge/Arduino-Uno-00878F?style=flat-square&logo=arduino&logoColor=white)
-![Control](https://img.shields.io/badge/Control-Hysteresis-cf222e?style=flat-square)
-![Power stage](https://img.shields.io/badge/Power%20stage-N--MOSFET%20low--side-1f2328?style=flat-square)
+![Sensor](https://img.shields.io/badge/sensor-DHT11-0969da?style=flat-square)
+![Control](https://img.shields.io/badge/control-PWM%20speed-cf222e?style=flat-square)
+![Power stage](https://img.shields.io/badge/power%20stage-IRF520%20MOSFET-1f2328?style=flat-square)
 ![Status](https://img.shields.io/badge/status-prototype-bf8700?style=flat-square)
 
 ---
@@ -25,42 +26,37 @@
 
 ## 1. Project Overview
 
-A GPU dumps a lot of heat into a small space. If that heat isn't moved out, the chip throttles or wears out faster. This project models that problem at prototype scale: an enclosure with a heat source, a temperature sensor, and fans that the controller turns on only when they're needed.
+A graphics card turns a lot of power into heat in a small space. If that heat isn't removed, the chip throttles and its lifespan drops. Real GPUs handle this by scaling fan speed with temperature: quiet when idle, louder only when needed.
 
-The interesting part isn't turning a fan on. It's separating the **5 V logic side** from the **12 V power side** cleanly, and making the controller behave sensibly when the temperature sits right at the threshold.
+This project builds that behavior at prototype scale. A **DHT11** reads the enclosure temperature, an **Arduino** turns it into a fan-speed command, and an **IRF520 MOSFET module** switches the fan current using PWM.
 
 ```mermaid
 flowchart LR
     A[🔥 Heat inside<br/>enclosure] --> B[DHT11<br/>sensor]
-    B -- single-wire<br/>digital data --> C[Arduino Uno<br/>control logic]
-    C -- 5 V gate<br/>signal --> D[Logic-level<br/>N-MOSFET]
-    E[12 V supply] --> F[DC fans]
-    F --> D
-    D --> G[GND]
+    B -- single-wire<br/>digital data --> C[Arduino Uno<br/>temp → speed curve]
+    C -- PWM on D9 --> D[IRF520<br/>MOSFET module]
+    E[Fan supply] --> D
+    D -- switched<br/>fan current --> F[DC fans]
     F -. airflow .-> A
 ```
 
 ## 2. Objective
 
-- Keep the enclosure temperature inside a defined band without running the fans all the time.
-- Drive a 12 V load from a 5 V microcontroller pin **without** the pin ever carrying fan current.
-- Avoid rapid ON/OFF switching (chatter) when temperature hovers around the setpoint.
+- Cool the enclosure **in proportion** to how hot it is, instead of running the fans flat out all the time.
+- Drive the fans from an external supply, so the Arduino pin only provides a control signal and never carries fan current.
+- Understand PWM as a way to control the power going to a motor load.
 
 ## 3. Components
 
 | Component | Role | Why this part |
 |---|---|---|
-| Arduino Uno | Controller | Plenty of I/O, 5 V logic matches the DHT11 and the MOSFET gate drive |
-| DHT11 | Temperature sensor | Digital output, so no analog noise on long wires. Its 0–50 °C range covers this application. |
-| Logic-level N-MOSFET (e.g. IRLZ44N) | Low-side fan switch | Fully on at V<sub>GS</sub> = 5 V. A standard MOSFET like the IRF540N is only partly on at 5 V and would run hot. |
-| 12 V DC fans | Cooling actuator | Standard PC fans, quiet and cheap |
-| 1N5819 Schottky diode | Flyback protection | Fans are motors, so they're inductive. Switching them off without a diode sends a voltage spike into the MOSFET. |
-| 220 Ω resistor | Gate resistor | Limits the inrush current that charges the gate capacitance and damps ringing |
-| 10 kΩ resistor | Gate pull-down | Holds the MOSFET off while the Arduino boots and its pins are still floating |
-| 12 V supply | Fan power | Kept separate from the Arduino's 5 V rail |
+| Arduino Uno | Controller | Hardware PWM on D9, 5 V logic that matches the sensor and the module |
+| DHT11 | Temperature sensor | Digital output, so no analog noise on the wire. Its 0–50 °C range covers this application. |
+| IRF520 MOSFET driver module | Fan power switch | A ready-made low-side switch: it has screw terminals for the load and supply, a SIG input pin, and an on-board indicator LED |
+| DC cooling fans | Cooling actuator | Speed follows the average voltage, so PWM controls it directly |
+| External DC supply | Fan power | Keeps fan current off the Arduino's regulator |
+| Diode (e.g. 1N5819) | Flyback protection | Add one across the fans if your module doesn't have one on board (see [Challenges](#9-challenges)) |
 | Enclosure | Simulated GPU housing | Cardboard in this prototype (see [Challenges](#9-challenges)) |
-
-> **Reconstruction note:** Controller used in the reconstructed implementation: Arduino Uno. The MOSFET, diode and resistor values are the recommended parts for this design. Swap in the exact part numbers if your build differs.
 
 A full bill of materials is in [`BOM.md`](BOM.md).
 
@@ -68,44 +64,48 @@ A full bill of materials is in [`BOM.md`](BOM.md).
 
 ### 4.1 Signal path
 
-1. The **DHT11** measures temperature and sends it as a 40-bit frame over one data wire.
-2. The **Arduino** decodes the frame, giving a temperature in °C.
-3. The **control logic** compares it with two thresholds (see 4.2) and decides the fan state.
-4. **D9** drives the MOSFET gate HIGH (5 V) or LOW (0 V).
-5. When the gate is high, the MOSFET connects the fans' negative lead to ground, current flows from the 12 V supply, and the fans spin.
-6. Airflow carries heat out of the enclosure, the temperature falls, and the loop closes.
+1. The **DHT11** measures temperature and sends it as a 40-bit digital frame on one wire.
+2. The **Arduino** decodes the frame into a temperature in °C, every 2 seconds.
+3. The **speed curve** (4.2) turns that temperature into a PWM value from 0 to 255.
+4. `analogWrite()` outputs that PWM on **D9**, a 5 V square wave at about 490 Hz whose duty cycle sets the speed.
+5. The PWM drives the **IRF520's gate** through the module's SIG pin. On each HIGH pulse the MOSFET conducts and connects the fans' negative terminal to ground.
+6. The fans see the supply voltage switched on and off very quickly. Their inertia averages that out, so they spin at a speed set by the **duty cycle**:
 
-### 4.2 Why hysteresis and not one threshold
+$$V_{fan,avg} = D \times V_{supply}$$
 
-With a single threshold at 35 °C, a reading that flickers 34.9 → 35.0 → 34.9 flips the fans every sample. That's noisy, wears the fans, and creates switching transients for no reason.
+### 4.2 Speed curve
 
-So the controller uses **two** thresholds:
+| Temperature | Fan command | Why |
+|---|---|---|
+| below 30 °C | **0 %**: off | No cooling needed, so the system stays silent |
+| 30 °C | **jump to ~35 %** | A DC fan won't start below a minimum duty. Starting at 0 % and ramping up would leave a range where the fan hums but doesn't turn. |
+| 30–40 °C | **linear ramp** from 35 % to 100 % | More heat, more airflow |
+| 40 °C and above | **100 %** | Full cooling capacity |
 
-| Condition | Action |
-|---|---|
-| fans OFF and T ≥ 35 °C | turn fans ON |
-| fans ON and T ≤ 30 °C | turn fans OFF |
-| 30 °C < T < 35 °C | **keep the current state** |
+<p align="center"><img src="Diagrams/temp-to-pwm.svg" width="660" alt="Temperature to PWM curve"></p>
 
-<p align="center"><img src="Diagrams/hysteresis.svg" width="620" alt="Hysteresis diagram"></p>
-
-Wider than the DHT11's ±2 °C accuracy, the 5 °C band means sensor noise alone can't toggle the fans.
+The DHT11 reports whole degrees, so the curve is really a **staircase** of 1 °C steps, not a smooth line.
 
 ```mermaid
-stateDiagram-v2
-    [*] --> FAN_OFF
-    FAN_OFF --> FAN_ON : T ≥ 35 °C
-    FAN_ON --> FAN_OFF : T ≤ 30 °C
-    FAN_OFF --> FAN_OFF : T < 35 °C
-    FAN_ON --> FAN_ON : T > 30 °C
-    FAN_OFF --> SENSOR_ERROR : reading = NaN
-    FAN_ON --> SENSOR_ERROR : reading = NaN
-    SENSOR_ERROR --> FAN_OFF : valid reading
+flowchart TD
+    S([Every 2 s]) --> R[Read DHT11]
+    R --> N{Valid reading?}
+    N -- no --> FS[Fail-safe:<br/>fans 100 %]
+    N -- yes --> A{T < 30 °C?}
+    A -- yes --> OFF[PWM = 0]
+    A -- no --> B{T ≥ 40 °C?}
+    B -- yes --> MAX[PWM = 255]
+    B -- no --> LIN["PWM = map(T, 30, 40, 90, 255)"]
+    OFF --> W[analogWrite D9<br/>log CSV]
+    MAX --> W
+    LIN --> W
+    FS --> S
+    W --> S
 ```
 
 ### 4.3 Why low-side switching
 
-Putting the MOSFET between the fans and **ground** means the source sits at 0 V, so the 5 V from the Arduino appears directly as V<sub>GS</sub>. On the high side (between +12 V and the fan), the source would float up near 12 V, and turning it on would need a gate driver or a P-channel part.
+The IRF520 sits between the fans and **ground**. That puts its source at 0 V, so the Arduino's PWM signal is applied directly as the gate-source voltage V<sub>GS</sub>. On the high side, the source would float up toward the supply voltage, and a 5 V signal couldn't turn the MOSFET on.
 
 ## 5. Circuit Design
 
@@ -113,47 +113,40 @@ Putting the MOSFET between the fans and **ground** means the source sits at 0 V,
 
 | From | To | Note |
 |---|---|---|
-| DHT11 VCC | Arduino 5V | |
-| DHT11 DATA | Arduino D2 | 10 kΩ pull-up to 5 V (often already on the module) |
-| DHT11 GND | GND | |
-| Arduino D9 | 220 Ω → MOSFET Gate | |
-| MOSFET Gate | 10 kΩ → GND | pull-down |
-| MOSFET Source | GND | |
-| MOSFET Drain | Fan (–) | |
-| Fan (+) | +12 V | |
-| 1N5819 | across the fan | cathode to +12 V, anode to drain |
-| 12 V supply GND | Arduino GND | **common ground is required** |
+| DHT11 VCC / GND | Arduino 5V / GND | |
+| DHT11 DATA | Arduino D2 | 10 kΩ pull-up (usually already on the module) |
+| IRF520 module SIG | Arduino D9 | PWM-capable pin |
+| IRF520 module VCC / GND | Arduino 5V / GND | |
+| IRF520 module VIN / GND | Fan supply + / − | |
+| IRF520 module V+ / V− | Fan + / − | |
+| Flyback diode | across the fans | cathode to fan +, anode to fan − |
 
-### Schematic
+### Inside the IRF520 module
 
 ```
-                         +12V
-                          │
-                    ┌─────┴─────┐
-                    │           │
-                  ──┴──       ┌─┴─┐
-          1N5819   ▲  (K up)  │FAN│
-                  ──┬──       └─┬─┘
-                    │           │
-                    └─────┬─────┘
-                          │ Drain
-  Arduino D9 ──[220Ω]──┬──┤ IRLZ44N
-                       │  │ Source
-                    [10kΩ] │
-                       │  │
-  GND ─────────────────┴──┴──────── 12 V supply GND
+   Fan supply +  ─────────────┬────────────┐
+                              │            │
+                            [FAN]       ──┴── diode
+                              │          ▲  (cathode up)
+                              │         ──┬──
+                              ├───────────┘
+                              │ Drain
+   SIG (D9) ──[R]──┬──────────┤ IRF520
+                   │          │ Source
+                 [R pull-down]│
+                   │          │
+   GND ────────────┴──────────┴─────── Fan supply −
 ```
 
-Why the common ground matters: V<sub>GS</sub> is measured from gate to source. If the Arduino ground and the fan-supply ground aren't tied together, the "5 V" on the gate has no defined reference relative to the source, and the MOSFET may not turn on at all.
+The module provides the gate resistor, the pull-down and the screw terminals. The fan supply's ground and the Arduino's ground are joined through the module's GND, which gives V<sub>GS</sub> a common reference.
 
 ## 6. Implementation
 
-1. Wire and test the DHT11 alone. Print readings to Serial and check them against a reference thermometer.
-2. Build the power stage on its own. Drive D9 HIGH and LOW by hand and confirm the fans switch.
-3. Measure the MOSFET case temperature with the fans running for a few minutes. A logic-level part should stay cool.
-4. Combine both stages and load the hysteresis sketch.
-5. Mount the sensor near the heat source and away from the direct fan airflow, so it measures the enclosure and not the breeze.
-6. Test by heating the enclosure and watching the Serial log as it crosses both thresholds.
+1. Wire the DHT11 alone and print readings to Serial to confirm they're sensible.
+2. Connect the IRF520 module and the fans. Test with fixed values (`analogWrite(9, 0)`, `128`, `255`) to confirm the fans respond to duty cycle.
+3. Find the **minimum starting duty**: raise the PWM value slowly from 0 and note where the fans actually start spinning. That's where `PWM_MIN` comes from.
+4. Load the full sketch and mount the sensor near the heat source, out of the direct airflow.
+5. Heat the enclosure and watch the Serial log as temperature and fan speed rise together.
 
 ## 7. Source Code
 
@@ -162,38 +155,38 @@ Why the common ground matters: V<sub>GS</sub> is measured from gate to source. I
 The core of the controller:
 
 ```cpp
-if (!fanState && temperature >= FAN_ON_TEMP) {
-  fanState = true;            // too hot → start cooling
-} else if (fanState && temperature <= FAN_OFF_TEMP) {
-  fanState = false;           // cooled enough → stop
+int temperatureToPwm(float temperature) {
+  if (temperature < TEMP_MIN)  return 0;          // cool: fans off
+  if (temperature >= TEMP_MAX) return PWM_MAX;    // hot: full speed
+  return map((long)temperature, TEMP_MIN, TEMP_MAX, PWM_MIN, PWM_MAX);
 }
-// between the two thresholds: no change (this is the hysteresis)
-digitalWrite(FAN_CONTROL_PIN, fanState ? HIGH : LOW);
 ```
 
 Design decisions in the code:
 
 | Decision | Reason |
 |---|---|
-| `delay(2000)` between reads | The DHT11 can't be sampled faster than about once per second. Reading faster returns stale or failed data. |
-| `isnan()` check | A failed read returns NaN. Without the check, NaN comparisons are always false, so the fans would silently keep their last state. |
-| `fanState` held in a variable | Hysteresis needs memory, because the decision depends on the current state as well as the temperature. |
-| CSV output on Serial | Makes it easy to log a test run straight into [`Data/`](Data/) and plot it |
+| `PWM_MIN = 90` instead of starting from 0 | Below about 35 % duty the fans stall, so the ramp starts at a speed that actually spins them |
+| Read every 2 s | The DHT11 can't be sampled faster than about once per second |
+| Fail-safe on a failed read | If the sensor stops responding, the temperature is unknown. Running the fans at 100 % is the safe choice; switching them off isn't. |
+| D9 for PWM | One of the Uno's hardware-PWM pins (Timer1) |
+| CSV on Serial | A test run can be logged straight into [`Data/`](Data/) and plotted |
 
 **Libraries:** *DHT sensor library* by Adafruit, plus its *Adafruit Unified Sensor* dependency.
+
+> The temperature thresholds (30 °C / 40 °C) and `PWM_MIN` are illustrative values. Tune them for your fans and enclosure.
 
 ## 8. Results
 
 **Expected behavior**
-- The fans stay off until the enclosure reaches the upper threshold, then run until it drops to the lower one.
-- No chatter around the setpoint, because the 5 °C band absorbs sensor noise.
-- The Arduino pin only drives the MOSFET gate, so it carries almost no current.
+- The fans stay off while the enclosure is cool, start at around 30 °C, and speed up as it gets hotter.
+- Speed changes in small steps instead of the fans slamming fully on or off, which makes the system quieter.
 
 **What the control logic should produce.** This comes from a simple first-order thermal model, not measured data:
 
 <p align="center"><img src="Analysis/simulated-response.svg" width="680" alt="Simulated response"></p>
 
-The dashed line shows what would happen with no cooling. The red line shows the controller holding the temperature in the 30–35 °C band by cycling the fans. The model is in [`Analysis/`](Analysis/).
+With no cooling (dashed line), the model heads toward about 69 °C. With PWM control, it settles a little above 30 °C with the fans at partial speed. That's the point of proportional control: just enough airflow to balance the heat. The model is explained in [`Analysis/`](Analysis/).
 
 **Measured performance.** To be filled in from a logged test run (template in [`Data/`](Data/)):
 
@@ -201,30 +194,33 @@ The dashed line shows what would happen with no cooling. The red line shows the 
 |---|---|
 | Initial temperature | — |
 | Maximum temperature | — |
-| Cooling activation point | — |
-| Time to cool from 35 °C to 30 °C | — |
-| Fan duty (fraction of time ON) | — |
+| Fan start temperature | — |
+| Steady-state temperature | — |
+| Steady-state fan duty | — |
 
 ## 9. Challenges
 
-**The enclosure was cardboard.** This was the biggest compromise in the build. Cardboard is a poor material for a heat project: it insulates, so it holds heat inside, and it isn't something you want sitting near a hot component for long. During testing it was actually exposed to the heat. I chose it because of time and budget, and tried to manage the risk with the lowest-cost fixes I could make in the time I had.
+**The enclosure was cardboard.** This was the biggest compromise in the build. Cardboard insulates, so it holds heat inside, and it isn't something you want sitting near a hot component for long. During testing it was actually exposed to the heat. I chose it because of time and budget, and tried to manage the risk with the lowest-cost fixes I could make in the time I had.
 
 What I took away from it:
-- An enclosure is part of the thermal design. Its material changes how fast heat builds up and how hard the fans have to work.
-- Next time: an aluminium or acrylic enclosure with a defined intake and exhaust path, so the air goes in one side, across the heat source, and out the other.
+- The enclosure is part of the thermal design. Its material changes how fast heat builds up and how hard the fans have to work.
+- Next time: an aluminium or acrylic enclosure with a defined intake and exhaust path.
 
-**Sensor placement.** If the sensor sits in the fan's airflow, it reads the moving air instead of the enclosure, and the controller turns the fans off too early.
+**The IRF520 is not a logic-level MOSFET.** Its datasheet specifies R<sub>DS(on)</sub> at V<sub>GS</sub> = 10 V, and its gate threshold can be as high as 4 V. Driven from a 5 V Arduino pin, it's only **partly** turned on. That works for small fans, but the MOSFET drops more voltage and runs warmer than it would with a proper gate drive. A logic-level part such as the IRLZ44N is fully on at 5 V.
 
-**DHT11 limits.** ±2 °C accuracy and a slow sample rate are fine for a demo but not for real GPU monitoring. A real card reads its die temperature from an on-chip sensor.
+**Flyback protection.** Fans are motors, which makes them inductive. Every time PWM switches them off, they produce a voltage spike. Some IRF520 modules don't include a diode for this, so one should be added across the fan terminals.
+
+**DHT11 limits.** With ±2 °C accuracy, 1 °C resolution and slow sampling, it's fine for a demo but coarse for control. That's why the fan speed moves in steps.
 
 ## 10. Future Improvements
 
-- [ ] **PWM fan speed control**: scale fan speed with temperature instead of switching it fully on or off (4-pin PWM fans, 25 kHz control).
-- [ ] **Better sensor**: DS18B20 or an NTC thermistor for faster, more accurate readings.
-- [ ] **OLED display** showing live temperature and fan state.
-- [ ] **Data logging** to an SD card for long test runs.
-- [ ] **Fans-off vs fans-on comparison** under the same heat load, to measure what the cooling actually achieves.
-- [ ] **Custom PCB** combining the sensor input, MOSFET stage and fan headers on one board.
+- [ ] Replace the IRF520 with a **logic-level MOSFET** (IRLZ44N) and compare MOSFET temperature.
+- [ ] Raise the PWM frequency to **25 kHz** (Timer1 registers) to remove audible whine.
+- [ ] Use **4-pin PWM fans**, where the motor stays powered and only a control line carries PWM, and read their **tachometer** to measure actual RPM.
+- [ ] Use a more precise sensor (**DS18B20** or an NTC thermistor) for smoother speed control.
+- [ ] Add an **OLED** showing temperature, fan duty and RPM.
+- [ ] Compare fans-off and fans-on under the same heat load, from logged data.
+- [ ] Design a **custom PCB**: sensor input, logic-level MOSFET stage, flyback diode and fan headers on one board.
 
 ## References
 

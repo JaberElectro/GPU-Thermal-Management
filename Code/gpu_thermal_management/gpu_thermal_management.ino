@@ -1,16 +1,16 @@
 /*
  * GPU Thermal Management System
  * -----------------------------
- * Reads temperature from a DHT11 and switches 12 V cooling fans through a
- * logic-level N-MOSFET (low-side). Uses hysteresis to avoid fan chatter.
- *
- * Controller used in the reconstructed implementation: Arduino Uno.
+ * Reads temperature from a DHT11 and sets the speed of the DC cooling
+ * fans with PWM through an IRF520 MOSFET driver module. The hotter the
+ * enclosure, the faster the fans spin.
  *
  * Wiring:
- *   DHT11 DATA -> D2 (10k pull-up to 5V)
- *   D9 -> 220R -> MOSFET gate, 10k gate pull-down to GND
- *   Fan(-) -> MOSFET drain, Fan(+) -> +12V, flyback diode across the fan
- *   12V supply GND tied to Arduino GND
+ *   DHT11 DATA -> D2 (10k pull-up to 5V, usually on the module)
+ *   IRF520 module SIG -> D9 (PWM), VCC -> 5V, GND -> GND
+ *   IRF520 module VIN/GND <- fan power supply
+ *   IRF520 module V+/V-   -> fans (+/-)
+ *   Fan supply GND and Arduino GND are common through the module
  *
  * Libraries: "DHT sensor library" (Adafruit) + "Adafruit Unified Sensor".
  *
@@ -22,59 +22,64 @@
 #define DHT_PIN  2
 #define DHT_TYPE DHT11
 
-const int   FAN_CONTROL_PIN = 9;
+const int FAN_PWM_PIN = 9;          // Timer1 PWM, ~490 Hz
 
-// Hysteresis band. Illustrative values, tune for your enclosure.
-// The 5 °C gap is wider than the DHT11's ±2 °C accuracy, so sensor
-// noise alone cannot toggle the fans.
-const float FAN_ON_TEMP  = 35.0;
-const float FAN_OFF_TEMP = 30.0;
+// Temperature-to-speed curve. Illustrative values, tune for your enclosure.
+const int TEMP_MIN = 30;            // below this: fans off
+const int TEMP_MAX = 40;            // at/above this: full speed
+const int PWM_MIN  = 90;            // ~35 % duty: lowest value that reliably starts the fans
+const int PWM_MAX  = 255;
 
 // The DHT11 must not be sampled faster than ~1 Hz.
 const unsigned long SAMPLE_INTERVAL_MS = 2000;
 
 DHT dht(DHT_PIN, DHT_TYPE);
-bool fanState = false;
+
+// Map temperature to a PWM value.
+//   T <  TEMP_MIN            -> 0 (off)
+//   TEMP_MIN <= T < TEMP_MAX -> linear from PWM_MIN to PWM_MAX
+//   T >= TEMP_MAX            -> PWM_MAX
+int temperatureToPwm(float temperature) {
+  if (temperature < TEMP_MIN)  return 0;
+  if (temperature >= TEMP_MAX) return PWM_MAX;
+  return map((long)temperature, TEMP_MIN, TEMP_MAX, PWM_MIN, PWM_MAX);
+}
 
 void setup() {
   Serial.begin(9600);
 
-  pinMode(FAN_CONTROL_PIN, OUTPUT);
-  digitalWrite(FAN_CONTROL_PIN, LOW);   // fans off at boot
+  pinMode(FAN_PWM_PIN, OUTPUT);
+  analogWrite(FAN_PWM_PIN, 0);      // fans off at boot
 
   dht.begin();
 
   Serial.println(F("# GPU Thermal Management System"));
-  Serial.println(F("time_s,temperature_c,fan_state"));
+  Serial.println(F("time_s,temperature_c,pwm,duty_percent"));
 }
 
 void loop() {
   float temperature = dht.readTemperature();
 
   if (isnan(temperature)) {
-    // A NaN would make every comparison below false and freeze the fan
-    // in its last state. Report it instead of acting on it.
-    Serial.println(F("# sensor read error"));
+    // Failed read: run the fans at full speed rather than leaving them
+    // off while the temperature is unknown (fail-safe).
+    analogWrite(FAN_PWM_PIN, PWM_MAX);
+    Serial.println(F("# sensor read error: fans forced to full speed"));
     delay(SAMPLE_INTERVAL_MS);
     return;
   }
 
-  // --- Hysteresis control ---
-  if (!fanState && temperature >= FAN_ON_TEMP) {
-    fanState = true;                  // too hot: start cooling
-  } else if (fanState && temperature <= FAN_OFF_TEMP) {
-    fanState = false;                 // cooled enough: stop
-  }
-  // Between the two thresholds the state is intentionally left unchanged.
+  int pwm = temperatureToPwm(temperature);
+  analogWrite(FAN_PWM_PIN, pwm);
 
-  digitalWrite(FAN_CONTROL_PIN, fanState ? HIGH : LOW);
-
-  // CSV: time_s, temperature_c, fan_state
+  // CSV: time_s, temperature_c, pwm, duty_percent
   Serial.print(millis() / 1000);
   Serial.print(',');
   Serial.print(temperature, 1);
   Serial.print(',');
-  Serial.println(fanState ? 1 : 0);
+  Serial.print(pwm);
+  Serial.print(',');
+  Serial.println((long)pwm * 100 / 255);
 
   delay(SAMPLE_INTERVAL_MS);
 }
