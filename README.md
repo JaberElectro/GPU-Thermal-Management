@@ -53,8 +53,8 @@ flowchart LR
 | Arduino Uno | Controller | Hardware PWM on D9, 5 V logic that matches the sensor and the module |
 | DHT11 | Temperature sensor | Digital output, so no analog noise on the wire. Its 0–50 °C range covers this application. |
 | IRF520 MOSFET driver module | Fan power switch | A ready-made low-side switch: it has screw terminals for the load and supply, a SIG input pin, and an on-board indicator LED |
-| DC cooling fans | Cooling actuator | Speed follows the average voltage, so PWM controls it directly |
-| External DC supply | Fan power | Keeps fan current off the Arduino's regulator |
+| 5 V DC cooling fans | Cooling actuator | Speed follows the average voltage, so PWM controls it directly |
+| External 5 V supply | Fan power | Keeps fan current off the Arduino's regulator |
 | Diode (e.g. 1N5819) | Flyback protection | Add one across the fans if your module doesn't have one on board (see [Challenges](#9-challenges)) |
 | Enclosure | Simulated GPU housing | Cardboard in this prototype (see [Challenges](#9-challenges)) |
 
@@ -206,7 +206,7 @@ What I took away from it:
 - The enclosure is part of the thermal design. Its material changes how fast heat builds up and how hard the fans have to work.
 - Next time: an aluminium or acrylic enclosure with a defined intake and exhaust path.
 
-**The IRF520 is not a logic-level MOSFET.** Its datasheet specifies R<sub>DS(on)</sub> at V<sub>GS</sub> = 10 V, and its gate threshold can be as high as 4 V. Driven from a 5 V Arduino pin, it's only **partly** turned on. That works for small fans, but the MOSFET drops more voltage and runs warmer than it would with a proper gate drive. A logic-level part such as the IRLZ44N is fully on at 5 V.
+**The IRF520 is not a logic-level MOSFET.** Its datasheet specifies R<sub>DS(on)</sub> at V<sub>GS</sub> = 10 V, and its gate threshold can be as high as 4 V. Driven from a 5 V Arduino pin, it's only **partly** turned on. That works for small fans, but the MOSFET drops more voltage and runs warmer than it would with a proper gate drive. With **5 V fans** this matters even more: every few hundred millivolts lost across the MOSFET is a noticeable share of the fans' supply, so they never quite reach full speed. A logic-level part such as the IRLZ44N is fully on at 5 V.
 
 **Flyback protection.** Fans are motors, which makes them inductive. Every time PWM switches them off, they produce a voltage spike. Some IRF520 modules don't include a diode for this, so one should be added across the fan terminals.
 
